@@ -340,27 +340,29 @@ export const getCurrentUser = async (req, res) => {
   });
 };
 export const forgotPassword = async (req, res) => {
+  console.log("forgotPassword called with email:", req.body.email); // <--- ADD THIS
+
   try {
     const { email } = req.body;
-    
     if (!email) {
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
-    
+
     const user = await db('users').where({ email }).first();
-    
+
     if (!user) {
       // Don't reveal if email exists for security
-      return res.json({ 
-        success: true, 
-        message: 'If an account exists with this email, you will receive a password reset link.' 
+      console.log("No user found with that email"); // <--- ADD THIS
+      return res.json({
+        success: true,
+        message: 'If an account exists with this email, you will receive a password reset link.'
       });
     }
-    
+
     // Generate reset token
     const resetToken = crypto.randomBytes(32).toString('hex');
     const resetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-    
+
     // Save token to database
     await db('users')
       .where({ id: user.id })
@@ -369,27 +371,29 @@ export const forgotPassword = async (req, res) => {
         reset_expires: resetExpires,
         updated_at: new Date()
       });
-    
+
     // Send reset email
     try {
       await sendPasswordResetEmail(user.email, user.name, resetToken);
+      console.log("Password reset email sent to", user.email); // <--- ADD THIS
     } catch (emailError) {
       console.error('Failed to send reset email:', emailError);
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Failed to send reset email. Please try again.' 
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send reset email. Please try again.'
       });
     }
-    
-    res.json({ 
-      success: true, 
-      message: 'If an account exists with this email, you will receive a password reset link.' 
+
+    res.json({
+      success: true,
+      message: 'If an account exists with this email, you will receive a password reset link.'
     });
   } catch (err) {
     console.error('Forgot password error:', err);
     res.status(500).json({ success: false, message: 'An error occurred. Please try again.' });
   }
 };
+
 
 // Reset password
 export const resetPassword = async (req, res) => {
