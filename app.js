@@ -1,3 +1,4 @@
+// app.js
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -11,15 +12,20 @@ import interviewRoutes from './routes/interviewRoutes.js';
 
 const app = express();
 
-// Middleware
+// Global request logger - logs EVERY request to your backend!
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
 app.use(cors({
   origin: [
-    'http://localhost:5173',      // Local development
-    'http://localhost:3000',      // Alternative local port
-    'https://*.vercel.app',       // Any Vercel deployment
-    'https://*.netlify.app',      // Any Netlify deployment
-    /https:\/\/.*\.vercel\.app$/,  // Regex for Vercel subdomains
-    /https:\/\/.*\.netlify\.app$/ // Regex for Netlify subdomains
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'https://*.vercel.app',
+    'https://*.netlify.app',
+    /https:\/\/.*\.vercel\.app$/,
+    /https:\/\/.*\.netlify\.app$/
   ],
   credentials: true
 }));

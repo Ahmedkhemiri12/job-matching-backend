@@ -43,69 +43,72 @@ const generateVerificationToken = () => {
 
 // Register a new user (recruiter or applicant)
 export const register = async (req, res) => {
+  console.log('REGISTER endpoint hit!', req.body);
+
   try {
     const { email, password, name, role } = req.body;
-    
+
     if (!email || !password || !role) {
       return res.status(400).json({ success: false, message: 'Email, password, and role are required.' });
     }
-    
+
     // Validate email format
     if (!validateEmail(email)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please provide a valid email address' 
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid email address'
       });
     }
-    
+
     // Validate password strength
     const passwordErrors = validatePassword(password);
     if (passwordErrors.length > 0) {
-      return res.status(400).json({ 
-        success: false, 
+      return res.status(400).json({
+        success: false,
         message: 'Password does not meet requirements',
-        errors: passwordErrors 
+        errors: passwordErrors
       });
     }
-    
+
     // Check if user exists
     const existing = await db('users').where({ email }).first();
     if (existing) {
+      console.log('Attempt to register with existing email:', email);
       return res.status(400).json({ success: false, message: 'Email already in use.' });
     }
-    
+
     // Generate verification token
     const verificationToken = generateVerificationToken();
     const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-    
+
     const password_hash = await bcrypt.hash(password, 10);
     const [id] = await db('users').insert({
       email,
       password_hash,
       name,
       role, // "recruiter" or "applicant"
-      email_verified: false, // New field
-      verification_token: verificationToken, // New field
-      verification_expires: verificationExpires, // New field
+      email_verified: false,
+      verification_token: verificationToken,
+      verification_expires: verificationExpires,
       created_at: new Date(),
       updated_at: new Date()
     });
-    
+
     // Send verification email
     try {
+      console.log('Sending verification email to:', email);
       await sendVerificationEmail(email, name, verificationToken);
       console.log('Verification email sent to:', email);
     } catch (emailError) {
       console.error('Failed to send verification email:', emailError);
-      // Don't fail registration if email fails, but log it
     }
-    
-    // Issue JWT (but user still needs to verify email)
+
+    // Issue JWT (user still needs to verify email)
     const token = jwt.sign({ id, email, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    
-    res.json({ 
-      success: true, 
-      token, 
+
+    res.json({
+      success: true,
+      token,
       user: { id, email, name, role },
       message: 'Registration successful! Please check your email to verify your account.'
     });
@@ -114,6 +117,7 @@ export const register = async (req, res) => {
     res.status(500).json({ success: false, message: 'Registration failed.' });
   }
 };
+
 
 // Verify email
 export const verifyEmail = async (req, res) => {
@@ -340,7 +344,7 @@ export const getCurrentUser = async (req, res) => {
   });
 };
 export const forgotPassword = async (req, res) => {
-  console.log("forgotPassword called with email:", req.body.email); // <--- ADD THIS
+  console.log("forgotPassword endpoint HIT!", req.body);
 
   try {
     const { email } = req.body;
@@ -351,8 +355,7 @@ export const forgotPassword = async (req, res) => {
     const user = await db('users').where({ email }).first();
 
     if (!user) {
-      // Don't reveal if email exists for security
-      console.log("No user found with that email"); // <--- ADD THIS
+      console.log("No user found with that email:", email);
       return res.json({
         success: true,
         message: 'If an account exists with this email, you will receive a password reset link.'
@@ -363,7 +366,6 @@ export const forgotPassword = async (req, res) => {
     const resetToken = crypto.randomBytes(32).toString('hex');
     const resetExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-    // Save token to database
     await db('users')
       .where({ id: user.id })
       .update({
@@ -374,8 +376,9 @@ export const forgotPassword = async (req, res) => {
 
     // Send reset email
     try {
+      console.log('Sending password reset email to:', user.email);
       await sendPasswordResetEmail(user.email, user.name, resetToken);
-      console.log("Password reset email sent to", user.email); // <--- ADD THIS
+      console.log('Password reset email sent to:', user.email);
     } catch (emailError) {
       console.error('Failed to send reset email:', emailError);
       return res.status(500).json({
@@ -393,7 +396,6 @@ export const forgotPassword = async (req, res) => {
     res.status(500).json({ success: false, message: 'An error occurred. Please try again.' });
   }
 };
-
 
 // Reset password
 export const resetPassword = async (req, res) => {
