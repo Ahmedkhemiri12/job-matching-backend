@@ -22,8 +22,7 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'http://localhost:3000',
-    'https://*.vercel.app',
-    'https://*.netlify.app',
+    'https://job-matching-app-woad.vercel.app',
     /https:\/\/.*\.vercel\.app$/,
     /https:\/\/.*\.netlify\.app$/
   ],
