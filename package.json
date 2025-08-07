@@ -5,8 +5,8 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js",
+    "start": "NODE_ENV=production node server.js",
+    "dev": "NODE_ENV=development nodemon server.js",
     "db:reset": "node seeds/resetAndSeed.js",
     "migrate": "knex migrate:latest",
     "migrate:make": "knex migrate:make",
@@ -28,6 +28,7 @@
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^7.0.5",
     "pdf-parse": "^1.1.1",
+    "pg": "^8.16.3",
     "sqlite3": "^5.1.7"
   },
   "devDependencies": {

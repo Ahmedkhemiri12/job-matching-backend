@@ -1,7 +1,25 @@
 import db from './database.js';
 
+// Add this function to check database connection
+export const checkDatabaseConnection = async () => {
+  try {
+    await db.raw('SELECT 1');
+    console.log('✅ Database connected successfully');
+    return true;
+  } catch (error) {
+    console.error('❌ Database connection failed:', error.message);
+    return false;
+  }
+};
+
 export const runMigrations = async () => {
   try {
+    // Check connection first
+    const isConnected = await checkDatabaseConnection();
+    if (!isConnected) {
+      throw new Error('Cannot run migrations - database not connected');
+    }
+
     // Create users table (needed for foreign keys)
     const hasUsersTable = await db.schema.hasTable('users');
     if (!hasUsersTable) {
@@ -14,8 +32,8 @@ export const runMigrations = async () => {
         table.boolean('email_verified').defaultTo(false);
         table.string('verification_token');
         table.timestamp('verification_expires');
-    
-    // Add password reset fields
+        
+        // Add password reset fields
         table.string('reset_token');
         table.timestamp('reset_expires');
         table.timestamps(true, true);
@@ -65,18 +83,37 @@ export const runMigrations = async () => {
           .onDelete('SET NULL');
         table.string('applicant_name').notNullable();
         table.string('applicant_email').notNullable();
-        table.string('file_name');              // Stores original filename
-        table.string('file_path');              // Stores server file path
-        table.integer('file_size');             // Stores file size in bytes
+        table.string('file_name');
+        table.string('file_path');
+        table.integer('file_size');
         table.json('parsed_skills');
         table.integer('match_percentage');
         table.enum('status', ['pending', 'reviewed', 'accepted', 'rejected'])
           .defaultTo('pending');
         table.text('notes');
-        table.string('scheduling_token');       // For secure interview scheduling
+        table.string('scheduling_token');
+        
+        // Add manual application fields
+        table.string('experience');
+        table.text('experience_details');
+        table.text('why_good_fit');
+        table.json('links');
+        
         table.timestamps(true, true);
       });
       console.log('Created applications table');
+    } else {
+      // Check if manual application fields exist, add if missing
+      const hasExperience = await db.schema.hasColumn('applications', 'experience');
+      if (!hasExperience) {
+        await db.schema.table('applications', table => {
+          table.string('experience');
+          table.text('experience_details');
+          table.text('why_good_fit');
+          table.json('links');
+        });
+        console.log('Added manual application fields to applications table');
+      }
     }
 
     // Create skills table
@@ -129,9 +166,9 @@ export const runMigrations = async () => {
       console.log('Created interviews table');
     }
 
-    console.log('Database migrations completed');
+    console.log('✅ Database migrations completed successfully');
   } catch (error) {
-    console.error('Migration error:', error);
+    console.error('❌ Migration error:', error);
     throw error;
   }
 };
