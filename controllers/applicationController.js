@@ -1,56 +1,73 @@
-import { calculateMatchPercentage } from '../services/applicationService.js';
+// server/controllers/applicationController.js
+import path from 'path';
+import fs from 'fs';
 import db from '../db/database.js';
+import { calculateMatchPercentage } from '../services/applicationService.js';
 import { sendApplicationStatusEmail } from '../services/emailService.js';
 
-// Handles job application submission by a logged-in user
+// ---------- tolerant parsers ----------
+function safeParseArray(v) {
+  if (Array.isArray(v)) return v.filter(Boolean);
+  if (v == null) return [];
+  if (typeof v === 'string') {
+    const s = v.trim();
+    if (!s) return [];
+    if (s.startsWith('[') && s.endsWith(']')) {
+      try {
+        const arr = JSON.parse(s);
+        return Array.isArray(arr) ? arr.filter(Boolean) : [];
+      } catch { /* fall through */ }
+    }
+    return s.split(',').map(x => x.trim()).filter(Boolean);
+  }
+  try {
+    const arr = JSON.parse(v);
+    return Array.isArray(arr) ? arr.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function safeParseObject(v) {
+  if (!v) return {};
+  if (typeof v === 'object') return v;
+  try {
+    const o = JSON.parse(v);
+    return (o && typeof o === 'object') ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+// ---------- create via manual apply ----------
 export const submitManualApplication = async (req, res) => {
   try {
-    console.log('=== MANUAL APPLICATION RECEIVED ===');
-    console.log('Request body:', req.body);
-    console.log('Authenticated user:', req.user);
-    
-    const { 
-      jobId, 
-      applicantName, 
-      applicantEmail, 
+    const {
+      jobId,
+      applicantName,
+      applicantEmail,
       applicantId,
       skills,
       experience,
       experienceDetails,
       whyGoodFit,
-      links 
+      links
     } = req.body;
 
-    console.log('Parsed fields:');
-    console.log('- jobId:', jobId);
-    console.log('- applicantName:', applicantName);
-    console.log('- applicantEmail:', applicantEmail);
-    console.log('- skills:', skills);
+    const skillsArray = safeParseArray(skills);
 
-    // Parse skills from comma-separated string to array
-    const skillsArray = skills ? skills.split(',').map(s => s.trim()).filter(s => s) : [];
-    console.log('Skills array:', skillsArray);
-    
-    // Calculate match percentage
     let matchPercentage = 0;
     try {
       matchPercentage = await calculateMatchPercentage(skillsArray, jobId);
-      console.log('Match percentage calculated:', matchPercentage);
-    } catch (matchError) {
-      console.error('Error calculating match percentage:', matchError);
-      // Continue with 0 if calculation fails
+    } catch (e) {
+      console.error('calculateMatchPercentage error:', e);
     }
-    
-    // Get applicant ID
-    const finalApplicantId = applicantId || req.user?.id;
-    console.log('Final applicant ID:', finalApplicantId);
 
-    // Prepare data for insertion
-    const applicationData = {
+    const insertData = {
       job_id: jobId,
       applicant_name: applicantName,
       applicant_email: applicantEmail,
-      applicant_id: finalApplicantId,
+      applicant_id: applicantId ?? req.user?.id ?? null,
       parsed_skills: JSON.stringify(skillsArray),
       match_percentage: matchPercentage,
       file_name: 'Manual Application',
@@ -60,220 +77,177 @@ export const submitManualApplication = async (req, res) => {
       experience: experience || null,
       experience_details: experienceDetails || null,
       why_good_fit: whyGoodFit || null,
-      links: links ? JSON.stringify(links) : null,
+      links: JSON.stringify(safeParseObject(links)),
       created_at: new Date(),
-      updated_at: new Date()
+      updated_at: new Date(),
     };
-    
-    console.log('Data to insert:', applicationData);
 
-    // Save to database
-    const [applicationId] = await db('applications').insert(applicationData);
-    console.log('Application saved with ID:', applicationId);
+    let inserted = await db('applications').insert(insertData).returning(['id']);
+    if (Array.isArray(inserted)) inserted = inserted[0] ?? inserted;
+    const applicationId = (inserted && typeof inserted === 'object') ? inserted.id : inserted;
 
-    res.status(201).json({ 
-      success: true, 
+    return res.status(201).json({
+      success: true,
       data: {
         applicationId,
         matchPercentage,
-        skills: skillsArray.map(skill => ({ name: skill, category: 'Manual Entry' }))
-      }
+        skills: skillsArray.map(name => ({ name, category: 'Manual Entry' })),
+      },
     });
   } catch (err) {
-    console.error('=== MANUAL APPLICATION ERROR ===');
-    console.error('Error:', err);
-    console.error('Error message:', err.message);
-    console.error('Error stack:', err.stack);
-    console.error('================================');
-    
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to save application', 
-      error: err.message 
+    console.error('=== MANUAL APPLICATION ERROR ===', err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || 'Failed to save application',
     });
   }
 };
 
-// Get all applications (for recruiters)
+// ---------- list applications (recruiter-scoped) ----------
 export const getApplications = async (req, res) => {
   try {
-    // Check if user is a recruiter
     if (req.user.role !== 'recruiter') {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Only recruiters can view applications' 
-      });
+      return res.status(403).json({ success: false, message: 'Only recruiters can view applications' });
     }
 
-    // Get applications with job details
-    const applications = await db('applications')
+    const rows = await db('applications as a')
+      .leftJoin('jobs as j', 'a.job_id', 'j.id')
       .select(
-        'applications.*',
-        'jobs.title as job_title',
-        'jobs.company as job_company',
-        'jobs.required_skills as job_required_skills',
-        'jobs.nice_to_have_skills as job_nice_to_have_skills'
+        'a.*',
+        'j.title as job_title',
+        'j.company as job_company',
+        'j.required_skills as job_required_skills',
+        'j.nice_to_have_skills as job_nice_to_have_skills',
+        'j.created_by as job_owner'
       )
-      .leftJoin('jobs', 'applications.job_id', 'jobs.id')
-      .where('jobs.created_by', req.user.id)
-      .orderBy('applications.match_percentage', 'desc') // Sort by match percentage DESC
-      .orderBy('applications.created_at', 'desc');
+      .where('j.created_by', req.user.id)
+      .orderBy('a.match_percentage', 'desc')
+      .orderBy('a.created_at', 'desc');
 
-    // Format applications with parsed data
-    const formattedApplications = applications.map(app => {
-      const parsedSkills = JSON.parse(app.parsed_skills || '[]');
-      const requiredSkills = JSON.parse(app.job_required_skills || '[]');
-      const niceToHaveSkills = JSON.parse(app.job_nice_to_have_skills || '[]');
-      
-      // Extract just skill names for comparison
-      const candidateSkillNames = parsedSkills.map(s => 
-        (typeof s === 'string' ? s : s.name).toLowerCase()
-      );
-      
-      // Calculate missing skills
-      const missingRequiredSkills = requiredSkills.filter(skill => 
-        !candidateSkillNames.includes(skill.toLowerCase())
-      );
-      
-      const missingNiceToHaveSkills = niceToHaveSkills.filter(skill => 
-        !candidateSkillNames.includes(skill.toLowerCase())
-      );
-      
+    const data = rows.map(r => {
+      const parsedSkills = safeParseArray(r.parsed_skills);
+      const requiredSkills = safeParseArray(r.job_required_skills);
+      const niceToHaveSkills = safeParseArray(r.job_nice_to_have_skills);
+
+      const candidateSkillNames = parsedSkills.map(s => (typeof s === 'string' ? s : s.name)).map(s => s.toLowerCase());
+
+      const missingRequiredSkills = requiredSkills.filter(s => !candidateSkillNames.includes(String(s).toLowerCase()));
+      const missingNiceToHaveSkills = niceToHaveSkills.filter(s => !candidateSkillNames.includes(String(s).toLowerCase()));
+
       return {
-        ...app,
-        skills: parsedSkills.map(s => typeof s === 'string' ? s : s.name),
+        id: r.id,
+        job_id: r.job_id,
+        job_title: r.job_title,
+        job_company: r.job_company,
+        applicant_name: r.applicant_name,
+        applicant_email: r.applicant_email,
+        status: r.status,
+        match_percentage: r.match_percentage ?? 0,
+        skills: parsedSkills.map(s => (typeof s === 'string' ? s : s.name)),
         requiredSkills,
         niceToHaveSkills,
         missingRequiredSkills,
         missingNiceToHaveSkills,
-        hasResume: app.file_name && app.file_name !== 'Manual Entry'
+        hasResume: Boolean(r.file_name && r.file_name !== 'Manual Entry'),
+        file_name: r.file_name,
+        file_size: r.file_size,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        links: safeParseObject(r.links),
       };
     });
 
-    res.json({ 
-      success: true, 
-      data: formattedApplications 
-    });
+    return res.json({ success: true, data });
   } catch (error) {
-    console.error('Get applications error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch applications' 
-    });
+    console.error('getApplications error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch applications' });
   }
 };
 
-// Get single application with resume
+// ---------- get a single application (auth-checked) ----------
 export const getApplication = async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Get application with job details
-    const application = await db('applications')
+
+    const row = await db('applications as a')
+      .leftJoin('jobs as j', 'a.job_id', 'j.id')
       .select(
-        'applications.*',
-        'jobs.title as job_title',
-        'jobs.company as job_company',
-        'jobs.required_skills as job_required_skills',
-        'jobs.created_by'
+        'a.*',
+        'j.title as job_title',
+        'j.company as job_company',
+        'j.required_skills as job_required_skills',
+        'j.created_by as job_owner'
       )
-      .leftJoin('jobs', 'applications.job_id', 'jobs.id')
-      .where('applications.id', id)
+      .where('a.id', id)
       .first();
-    
-    if (!application) {
-      return res.status(404).json({
-        success: false,
-        message: 'Application not found'
-      });
+
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Application not found' });
     }
-    
-    // Check authorization
-    if (application.created_by !== req.user.id && application.applicant_id !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to view this application'
-      });
+
+    if (req.user.role === 'recruiter' && row.job_owner !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
     }
-    
-    // Parse skills
-    application.skills = JSON.parse(application.parsed_skills || '[]');
-    application.requiredSkills = JSON.parse(application.job_required_skills || '[]');
-    
-    res.json({
-      success: true,
-      data: application
-    });
+    if (req.user.role === 'applicant' && row.applicant_id !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    const data = {
+      ...row,
+      parsed_skills: safeParseArray(row.parsed_skills),
+      requiredSkills: safeParseArray(row.job_required_skills),
+      links: safeParseObject(row.links),
+    };
+
+    return res.json({ success: true, data });
   } catch (error) {
-    console.error('Get application error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch application'
-    });
+    console.error('getApplication error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch application' });
   }
 };
 
-// Download resume
+// ---------- download resume file (recruiter owner only) ----------
 export const downloadResume = async (req, res) => {
   try {
-    const { id } = req.params;
-    
-    // Get application
-    const application = await db('applications')
-      .select('applications.*', 'jobs.created_by')
-      .leftJoin('jobs', 'applications.job_id', 'jobs.id')
-      .where('applications.id', id)
+    const appId = req.params.id;
+    const row = await db('applications as a')
+      .leftJoin('jobs as j', 'a.job_id', 'j.id')
+      .select('a.*', 'j.created_by as job_owner')
+      .where('a.id', appId)
       .first();
-    
-    if (!application) {
-      return res.status(404).json({
-        success: false,
-        message: 'Application not found'
-      });
+
+    if (!row) return res.status(404).json({ success: false, message: 'Application not found' });
+    if (req.user.role !== 'recruiter' || row.job_owner !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Not authorized to download this resume' });
     }
-    
-    // Check authorization (only recruiter who posted the job)
-    if (application.created_by !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to download this resume'
-      });
+    if (!row.file_path || row.file_name === 'Manual Entry') {
+      return res.status(404).json({ success: false, message: 'No resume file available' });
     }
-    
-    // Check if resume exists
-    if (!application.file_path || application.file_name === 'Manual Entry') {
-      return res.status(404).json({
-        success: false,
-        message: 'No resume file available for this application'
-      });
+
+    const absolute = path.resolve(row.file_path);
+    if (!fs.existsSync(absolute)) {
+      return res.status(404).json({ success: false, message: 'File not found on server' });
     }
-    
-    // Send file
-    res.download(application.file_path, application.file_name);
+    return res.download(absolute, row.file_name || path.basename(absolute));
   } catch (error) {
-    console.error('Download resume error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to download resume'
-    });
+    console.error('downloadResume error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to download resume' });
   }
 };
 
-// Update application status
+// ---------- update status (recruiter owner) ----------
 export const updateApplicationStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
+const s = String(status || '').toLowerCase();
 
-    // Validate status
-    if (!['pending', 'accepted', 'rejected'].includes(status)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid status' 
-      });
-    }
 
-    // Get full application details with job info
+    if (!['pending', 'accepted', 'rejected'].includes(s)) {
+  return res.status(400).json({ success: false, message: 'Invalid status' });
+}
+
+
     const application = await db('applications as a')
       .join('jobs as j', 'a.job_id', 'j.id')
       .where('a.id', id)
@@ -281,91 +255,65 @@ export const updateApplicationStatus = async (req, res) => {
       .first();
 
     if (!application || application.created_by !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to update this application'
-      });
+      return res.status(403).json({ success: false, message: 'Not authorized to update this application' });
     }
 
-    // Update the application
-    await db('applications')
-      .where({ id })
-      .update({ 
-        status,
-        updated_at: new Date()
-      });
+    await db('applications').where({ id }).update({ status: s, updated_at: new Date() });
 
-    // Send email notification
-if (status === 'accepted' || status === 'rejected') {
+
+    if (s === 'accepted' || s === 'rejected') {
   try {
-    await sendApplicationStatusEmail(
-      application.applicant_email,
-      application.applicant_name,
-      status,
-      application.job_title,
-      application.company,
-      id  // Pass the application ID for the scheduling link
-    );
-    console.log(`${status} email sent to ${application.applicant_email}`);
+    await sendApplicationStatusEmail({
+      to: application.applicant_email,
+      status: s,
+      applicationId: id, // or application.id if you prefer
+      name: application.applicant_name,
+      jobTitle: application.job_title,
+      company: application.company,
+    });
+    console.log(`${s} email sent to ${application.applicant_email}`);
   } catch (emailError) {
     console.error('Failed to send email:', emailError);
-    // Continue even if email fails
   }
 }
 
-    res.json({ 
-      success: true, 
-      message: `Application ${status} successfully` 
-    });
-    
+    return res.json({ success: true, message: `Application ${status} successfully` });
   } catch (error) {
-    console.error('Update status error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update application status' 
-    });
+    console.error('updateApplicationStatus error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update status' });
   }
 };
-// Add this at the very bottom of applicationController.js
+
+// ---------- public details (for scheduling link, etc.) ----------
 export const getApplicationDetails = async (req, res) => {
   try {
     const { id } = req.params;
-    const { token } = req.query; // Get token from query params
-    
-    const application = await db('applications')
-      .join('jobs', 'applications.job_id', 'jobs.id')
-      .join('users as recruiters', 'jobs.created_by', 'recruiters.id')
-      .where('applications.id', id)
+    const { token } = req.query;
+
+    const application = await db('applications as a')
+      .join('jobs as j', 'a.job_id', 'j.id')
+      .join('users as r', 'j.created_by', 'r.id')
+      .where('a.id', id)
       .select(
-        'applications.*',
-        'jobs.title as job_title',
-        'jobs.company',
-        'jobs.created_by as recruiter_id',
-        'recruiters.name as recruiter_name'
+        'a.*',
+        'j.title as job_title',
+        'j.company',
+        'j.created_by as recruiter_id',
+        'r.name as recruiter_name'
       )
       .first();
-    
+
     if (!application) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Application not found' 
-      });
+      return res.status(404).json({ success: false, message: 'Application not found' });
     }
-    
-    // Verify token if provided
-    if (token && application.scheduling_token !== token) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Invalid scheduling link' 
-      });
+
+    if (token && application.scheduling_token && application.scheduling_token !== token) {
+      return res.status(403).json({ success: false, message: 'Invalid scheduling link' });
     }
-    
-    res.json({ success: true, application });
+
+    return res.json({ success: true, application });
   } catch (error) {
-    console.error('Get application details error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to get application details' 
-    });
+    console.error('getApplicationDetails error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to get application details' });
   }
 };

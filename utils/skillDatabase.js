@@ -1,4 +1,15 @@
+// server/utils/skillDatabase.js
 import db from '../db/database.js';
+
+// --- Helper: tolerate bad JSON & non-array shapes ---
+function safeParseArray(value) {
+  try {
+    const v = typeof value === 'string' ? JSON.parse(value) : value;
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
 
 // This function replaces the static skillDatabase object
 export const getSkillsFromDatabase = async () => {
@@ -12,7 +23,7 @@ export const getSkillsFromDatabase = async () => {
       }
       skillsByCategory[skill.category].push({
         name: skill.name,
-        aliases: JSON.parse(skill.aliases || '[]')
+        aliases: safeParseArray(skill.aliases)
       });
     }
     
@@ -164,7 +175,6 @@ export const initialSkillData = {
   ],
 };
 
-
 // For backwards compatibility - this will be removed later
 export const skillDatabase = initialSkillData;
 
@@ -177,7 +187,7 @@ export const getSkillsByCategory = async (category) => {
     
     return skills.map(skill => ({
       name: skill.name,
-      aliases: JSON.parse(skill.aliases || '[]')
+      aliases: safeParseArray(skill.aliases)
     }));
   } catch (error) {
     console.error('Error fetching skills by category:', error);
@@ -193,7 +203,7 @@ export const findSkillByName = async (skillName) => {
       .first();
     
     if (skill) {
-      skill.aliases = JSON.parse(skill.aliases || '[]');
+      skill.aliases = safeParseArray(skill.aliases);
     }
     
     return skill;
@@ -206,10 +216,11 @@ export const findSkillByName = async (skillName) => {
 // Add skill with aliases
 export const addSkillWithAliases = async (name, category, aliases = []) => {
   try {
+    const safeAliases = safeParseArray(aliases);
     const [id] = await db('skills').insert({
       name,
       category,
-      aliases: JSON.stringify(aliases),
+      aliases: JSON.stringify(safeAliases),
       created_at: new Date(),
       updated_at: new Date()
     }).returning('id');
@@ -226,41 +237,70 @@ export const getTargetSkillsDB = (role) => {
   console.warn('getTargetSkillsDB is deprecated. Skills should come from job requirements.');
   return [];
 };
+
+// REPLACE your normalizeSkill + normalizeSkills with THIS
+
 export const normalizeSkill = async (skillName) => {
   try {
-    console.log(`Normalizing skill: "${skillName}"`);
-    
-    // SQLite doesn't support ilike, use LOWER() instead
+    const raw = String(skillName || '').trim();
+    if (!raw) return '';
+    const lower = raw.toLowerCase();
+
+    // 1) DB exact match (case-insensitive)
     let skill = await db('skills')
-      .whereRaw('LOWER(name) = LOWER(?)', [skillName.trim()])
+      .whereRaw('LOWER(name) = LOWER(?)', [raw])
       .first();
-    
-    if (skill) {
-      console.log(`Found exact match: "${skillName}" -> "${skill.name}"`);
-      return skill.name;
-    }
-    
-    // Then search in aliases
-    const skills = await db('skills').select('*');
+    if (skill) return skill.name;
+
+    // 2) DB alias match (case-insensitive)
+    const skills = await db('skills').select('name', 'aliases');
     for (const s of skills) {
-      const aliases = JSON.parse(s.aliases || '[]');
-      // Check if the skill name matches any alias
-      if (aliases.some(alias => 
-        alias.toLowerCase() === skillName.toLowerCase().trim()
-      )) {
-        console.log(`Found alias match: "${skillName}" -> "${s.name}"`);
-        return s.name; // Return the canonical name
+      const aliases = safeParseArray(s.aliases).map(a => String(a).toLowerCase());
+      if (aliases.includes(lower)) return s.name;
+    }
+
+    // 3) Quick fallback aliases for common variants
+    const FALLBACK_ALIASES = {
+      englisch: 'English',
+      english: 'English',
+      deutsch: 'German',
+      german: 'German',
+      'react.js': 'React',
+      reactjs: 'React',
+      nodejs: 'Node.js',
+      'node js': 'Node.js',
+      ai: 'Artificial Intelligence',
+      ml: 'Machine Learning',
+      'machine learning': 'Machine Learning',
+    };
+    if (FALLBACK_ALIASES[lower]) return FALLBACK_ALIASES[lower];
+
+    // 4) Fallback to static seed list (initialSkillData)
+    for (const category of Object.values(initialSkillData)) {
+      for (const item of category) {
+        if (String(item.name).toLowerCase() === lower) return item.name;
+        const itemAliases = (item.aliases || []).map(a => String(a).toLowerCase());
+        if (itemAliases.includes(lower)) return item.name;
       }
     }
-    
-    // Return original if no match found
-    console.log(`No match found for: "${skillName}", returning original`);
-    return skillName;
+
+    // 5) Return original if still unknown
+    return raw;
   } catch (error) {
     console.error('Error normalizing skill:', error);
     return skillName;
   }
 };
-export const normalizeSkills = async (skills) => {
-  return Promise.all(skills.map(skill => normalizeSkill(skill)));
+
+export const normalizeSkills = async (skills = []) => {
+  const mapped = await Promise.all((skills || []).map(normalizeSkill));
+  const seen = new Set();
+  return mapped.filter(s => {
+    const v = String(s || '').trim();
+    if (!v) return false;
+    const k = v.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 };

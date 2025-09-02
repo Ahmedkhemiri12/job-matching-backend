@@ -1,169 +1,172 @@
+// server/controllers/resumeController.js
 import { extractTextFromFile } from '../services/parserService.js';
 import { extractSkills } from '../services/skillExtractor.js';
-import { saveApplication, calculateMatchPercentage } from '../services/applicationService.js';
-import { normalizeSkills } from '../utils/skillDatabase.js'; // ADD THIS IMPORT
+import { saveApplication } from '../services/applicationService.js';
+import { normalizeSkills } from '../utils/skillDatabase.js';
+import { computeMatch } from '../utils/matching.js';
 import db from '../db/database.js';
 
+/**
+ * Tolerant array parser for query/body fields that might arrive as:
+ * - real arrays
+ * - CSV strings ("a, b, c")
+ * - JSON strings ('["a","b","c"]')
+ */
+function toArrayFlexible(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (!s) return [];
+    if ((s.startsWith('[') && s.endsWith(']')) || (s.startsWith('"') && s.endsWith('"'))) {
+      try { return JSON.parse(s); } catch { /* fall through to CSV */ }
+    }
+    return s.split(',').map(x => x.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+/**
+ * POST /api/resumes/parse
+ * Accepts a resume file, extracts text + candidate skills, optionally matches
+ * against job skills provided in the request body.
+ *
+ * Body (optional):
+ * - requiredSkills: array | csv | json-string
+ * - niceSkills:     array | csv | json-string
+ * - jobId:          string (if saving an application)
+ *
+ * Returns:
+ * {
+ *   success: true,
+ *   data: {
+ *     text,
+ *     rawCandidateSkills,
+ *     candidateSkills,     // normalized
+ *     jobRequiredSkills,   // normalized (if provided)
+ *     jobNiceSkills,       // normalized (if provided)
+ *     match: {             // only when job skills provided
+ *       score, requiredPct, nicePct,
+ *       requiredMatches, missingRequired, niceMatches,
+ *       candidate, required, nice
+ *     }
+ *   }
+ * }
+ */
 export const parseResume = async (req, res) => {
   try {
-    // ADD THIS LOGGING AT THE VERY START
-    console.log('=== INCOMING REQUEST ===');
-    console.log('req.body:', req.body);
-    console.log('req.file:', req.file ? 'File present' : 'No file');
-    console.log('========================');
-    
     if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No file uploaded'
-      });
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
 
-    const jobId = req.body.jobId;
-    const applicantName = req.body.applicantName;
-    const applicantEmail = req.body.applicantEmail;
-    const applicantId = req.body.applicantId;
-    
-    // ADD THIS LOGGING
-    console.log('Extracted values:');
-    console.log('- jobId:', jobId, '(type:', typeof jobId, ')');
-    console.log('- applicantName:', applicantName, '(type:', typeof applicantName, ')');
-    console.log('- applicantEmail:', applicantEmail, '(type:', typeof applicantEmail, ')');
-    console.log('- applicantId:', applicantId, '(type:', typeof applicantId, ')');
-
-    // ... rest of your code// ADD THIS LINE to capture applicantId
-
-    let jobRequiredSkills = [];
-    let jobTitle = "";
-    if (jobId) {
-      const job = await db('jobs').where({ id: jobId }).first();
-      if (job && job.required_skills) {
-        jobRequiredSkills = JSON.parse(job.required_skills);
-        // Normalize job required skills for consistent comparison
-        jobRequiredSkills = await normalizeSkills(jobRequiredSkills);
-        jobTitle = job.title || "";
-      }
-    }
-
-    // Extract resume text
+    // 1) Extract text from file
     const text = await extractTextFromFile(req.file);
 
-    if (!text || text.trim().length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Could not extract text from the file'
+    // 2) Extract skills from text (raw)
+    const rawCandidateSkills = await extractSkills(text);
+
+    // 3) Normalize via DB-backed canonicalizer
+    const candidateSkills = await normalizeSkills(rawCandidateSkills);
+
+    // Optional job skills provided by client for immediate matching
+    const jobRequiredInput = toArrayFlexible(req.body?.requiredSkills);
+    const jobNiceInput     = toArrayFlexible(req.body?.niceSkills);
+
+    let jobRequiredSkills = [];
+    let jobNiceSkills     = [];
+    let match = null;
+
+    if (jobRequiredInput.length || jobNiceInput.length) {
+      jobRequiredSkills = await normalizeSkills(jobRequiredInput);
+      jobNiceSkills     = await normalizeSkills(jobNiceInput);
+
+      // **** NEW ORDER + NEW KEYS ****
+      // computeMatch(required, nice, candidate)
+      const result = computeMatch(jobRequiredSkills, jobNiceSkills, candidateSkills);
+      match = {
+        score: result.score,
+        requiredPct: result.requiredPct,
+        nicePct: result.nicePct,
+        requiredMatches: result.requiredMatches,
+        missingRequired: result.missingRequired,
+        niceMatches: result.niceMatches,
+        candidate: result.candidate,
+        required: result.required,
+        nice: result.nice,
+      };
+    }
+
+    // Optionally persist an application if jobId is provided
+    if (req.body?.jobId) {
+      await saveApplication({
+        db,
+        jobId: req.body.jobId,
+        fileMeta: {
+          originalname: req.file.originalname,
+          mimetype: req.file.mimetype,
+          size: req.file.size,
+        },
+        text,
+        candidateSkills,
+        match,
       });
     }
 
-    // Extract skills, passing in job-specific required skills
-    // Skills are already normalized in skillExtractor.js
-    const extractedData = await extractSkills(text, jobRequiredSkills);
-
-    let matchPercentage = 0;
-    let applicationId = null;
-
-    if (jobId && applicantName && applicantEmail) {
-      try {
-        // CHECK FOR EXISTING APPLICATION
-        const existingApp = await db('applications')
-          .where({
-            job_id: jobId,
-            applicant_email: applicantEmail
-          })
-          .first();
-        
-        if (existingApp) {
-          return res.status(400).json({
-            success: false,
-            message: 'You have already applied for this position. Each candidate can only apply once per job.',
-            alreadyApplied: true
-          });
-        }
-        
-        // Continue with match calculation and saving...
-        matchPercentage = await calculateMatchPercentage(
-          extractedData.skills.map(skill => skill.name),
-          jobId
-        );
-        
-        applicationId = await saveApplication({
-          jobId,
-          applicantName,
-          applicantEmail,
-          applicantId,
-          parsedSkills: extractedData.skills.map(skill => skill.name),
-          matchPercentage,
-          fileName: req.file.originalname,
-          filePath: req.file.path,
-          fileSize: req.file.size
-        });
-        console.log('=== APPLICATION SAVED ===');
-console.log('Application ID:', applicationId);
-console.log('Job ID:', jobId);
-console.log('Applicant:', applicantName, applicantEmail);
-console.log('Applicant ID:', applicantId);
-console.log('Match %:', matchPercentage);
-console.log('========================');
-      } catch (error) {
-        console.error('Application save error:', error);
-        return res.status(400).json({
-          success: false,
-          message: error.message
-        });
-      }
-    }
-
-    console.log('Extracted skills:', extractedData.skills);
-    console.log('Job required skills after normalization:', jobRequiredSkills);
-    
-    res.json({
+    return res.json({
       success: true,
       data: {
-        skills: extractedData.skills, // Already normalized from skillExtractor
-        skillsByCategory: extractedData.skillsByCategory,
-        stats: extractedData.stats,
-        matchPercentage,
-        applicationId,
-        filename: req.file.originalname,
-        fileSize: req.file.size,
-        filePath: req.file.path,
-        processedAt: new Date().toISOString(),
-        targetSkills: jobRequiredSkills, // Now normalized
-        jobTitle
-      }
+        text,
+        rawCandidateSkills,
+        candidateSkills,
+        jobRequiredSkills,
+        jobNiceSkills,
+        ...(match ? { match } : {}),
+      },
     });
   } catch (error) {
     console.error('Parse resume error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message || 'Failed to parse resume'
+      message: error?.message || 'Failed to parse resume',
     });
   }
 };
 
-// Utility to get target skills for a given role (if still needed)
-export const getTargetSkills = async (req, res) => { // ADD async here
+/**
+ * GET /api/resumes/target-skills?role=... OR ?skills=csv/json/array
+ * Returns a normalized skill list for a role or a provided set.
+ */
+export const getTargetSkills = async (req, res) => {
   try {
-    const { role = 'default' } = req.query;
-    let targetSkills = [];
-    
-    // You may want to fetch from DB, but for now use a static list
-    if (role === 'developer') {
-      targetSkills = ["React", "JavaScript", "English"];
+    const role = (req.query.role || '').toString().trim().toLowerCase();
+    let targetSkills = toArrayFlexible(req.query.skills);
+
+    // If no explicit list is provided, infer some role-based defaults (simple example).
+    if (!targetSkills.length && role) {
+      switch (role) {
+        case 'developer':
+        case 'frontend':
+        case 'frontend-developer':
+        case 'react':
+          targetSkills = ['React', 'JavaScript', 'English'];
+          break;
+        case 'data':
+        case 'data-science':
+        case 'ml':
+          targetSkills = ['Python', 'Pandas', 'Machine Learning', 'English'];
+          break;
+        default:
+          targetSkills = ['English']; // minimal default
+      }
     }
-    
-    // Normalize the target skills before sending
-    targetSkills = await normalizeSkills(targetSkills);
-    
-    res.json({
-      success: true,
-      data: targetSkills
-    });
+
+    // Normalize through DB so only canonical tokens are returned
+    const normalized = await normalizeSkills(targetSkills);
+    return res.json({ success: true, data: normalized });
   } catch (error) {
     console.error('Get target skills error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get target skills'
+      message: error?.message || 'Failed to get target skills',
     });
   }
 };

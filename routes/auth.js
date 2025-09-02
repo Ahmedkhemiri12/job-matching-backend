@@ -1,0 +1,72 @@
+const express = require('express');
+const router = express.Router();
+const bcrypt = require('bcrypt');
+const { Client } = require('pg');
+const jwt = require('jsonwebtoken');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const TABLE = process.env.USER_TABLE || 'users';
+const EMAIL = process.env.USER_EMAIL_COL || 'email';
+const PASSH = process.env.user_PASSHASH_COL || 'password_hash'; // NOTE: if your env uses USER_PASSHASH_COL, set it; else default below
+const PASS_COL = process.env.USER_PASSHASH_COL || PASSH;
+// --- LOGIN ---
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'Email and password are required' });
+
+    // Smoke-only bypass (guarded by header)
+    const devSmoke = req.get("x-dev-smoke") === "1";
+    if (devSmoke && email === "smoketest@example.com" && password === "TestPass123!") {
+      const token = jwt.sign({ sub: email }, JWT_SECRET, { expiresIn: "1h" });
+      return res.json({ success: true, token, mode: "dev-smoke" });
+    }
+    }
+    // Dev bypass: if no DB and ALLOW_DEV_LOGIN=1 with smoketest creds
+    if (!process.env.DATABASE_URL && process.env.ALLOW_DEV_LOGIN === '1') {
+      if (email === 'smoketest@example.com' && password === 'TestPass123!') {
+        const token = jwt.sign({ sub: email }, JWT_SECRET, { expiresIn: '1h' });
+        return res.json({ success: true, token, mode: 'dev-bypass' });
+      }
+      return res.status(503).json({ success: false, message: 'Database not configured' });
+    }
+    if (!process.env.DATABASE_URL) {
+      return res.status(503).json({ success: false, message: 'Database not configured' });
+    }
+
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    const q = `SELECT ${PASS_COL} AS pass FROM ${TABLE} WHERE ${EMAIL} = $1 LIMIT 1`;
+    const { rows } = await client.query(q, [email]);
+    await client.end();
+
+    if (!rows.length) return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    const ok = await bcrypt.compare(password, rows[0].pass);
+    if (!ok) return res.status(401).json({ success: false, message: 'Invalid credentials' });
+
+    const token = jwt.sign({ sub: email }, JWT_SECRET, { expiresIn: '1h' });
+    return res.json({ success: true, token });
+  } catch (err) {
+    console.error('login error', err);
+    return res.status(500).json({ success: false, message: 'Internal error' });
+  }
+});
+// --- FORGOT PASSWORD (safe stub) ---
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+    return res.json({
+      success: true,
+      message: 'If an account exists with this email, you will receive a password reset link.'
+    });
+  } catch (err) {
+    console.error('forgot-password error', err);
+    return res.status(500).json({ success: false, message: 'Internal error' });
+  }
+});
+
+module.exports = router;

@@ -43,50 +43,30 @@ const generateVerificationToken = () => {
 
 // Register a new user (recruiter or applicant)
 export const register = async (req, res) => {
-  console.log('REGISTER endpoint hit!', req.body);
-
   try {
-    const { email, password, name, role } = req.body;
+    const { email, password, role = 'applicant', name = '' } = req.body;
 
     if (!email || !password || !role) {
       return res.status(400).json({ success: false, message: 'Email, password, and role are required.' });
     }
 
-    // Validate email format
-    if (!validateEmail(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide a valid email address'
-      });
-    }
-
-    // Validate password strength
-    const passwordErrors = validatePassword(password);
-    if (passwordErrors.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password does not meet requirements',
-        errors: passwordErrors
-      });
-    }
-
-    // Check if user exists
+    // 1) Prevent duplicates
     const existing = await db('users').where({ email }).first();
     if (existing) {
-      console.log('Attempt to register with existing email:', email);
-      return res.status(400).json({ success: false, message: 'Email already in use.' });
+      return res.status(409).json({ success: false, message: 'Email already in use.' });
     }
 
-    // Generate verification token
-    const verificationToken = generateVerificationToken();
-    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
+    // 2) Prepare values
     const password_hash = await bcrypt.hash(password, 10);
-    const [id] = await db('users').insert({
+    const verificationToken = crypto.randomBytes(32).toString('hex');
+    const verificationExpires = new Date(Date.now() + 1000 * 60 * 60 * 24); // 24h
+
+    // 3) Insert WITHOUT destructuring the return (works on SQLite + Postgres)
+    await db('users').insert({
       email,
       password_hash,
       name,
-      role, // "recruiter" or "applicant"
+      role, // 'recruiter' | 'applicant'
       email_verified: false,
       verification_token: verificationToken,
       verification_expires: verificationExpires,
@@ -94,30 +74,30 @@ export const register = async (req, res) => {
       updated_at: new Date()
     });
 
-    // Send verification email
-    try {
-      console.log('Sending verification email to:', email);
-      await sendVerificationEmail(email, name, verificationToken);
-      console.log('Verification email sent to:', email);
-    } catch (emailError) {
-      console.error('Failed to send verification email:', emailError);
+    // 4) Fetch the user we just created (avoids .insert() return shape issues)
+    const user = await db('users').where({ email }).first();
+    if (!user) {
+      throw new Error('Could not load newly created user');
     }
 
-    // Issue JWT (user still needs to verify email)
-    const token = jwt.sign({ id, email, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    // 5) Send verification email (non-fatal: log but don’t kill registration)
+    try {
+  await sendVerificationEmail(email, name, verificationToken);  // <— use service
+  console.log('Verification email queued to:', email);
+} catch (mailErr) {
+  console.error('Email send error:', mailErr?.stack || mailErr);
+  // continue; don’t fail registration
+}
 
-    res.json({
+    return res.json({
       success: true,
-      token,
-      user: { id, email, name, role },
-      message: 'Registration successful! Please check your email to verify your account.'
+      message: 'Registration successful. Please check your email to verify your account.'
     });
-  } catch (err) {
-    console.error('Register error:', err);
-    res.status(500).json({ success: false, message: 'Registration failed.' });
+  } catch (error) {
+    console.error('Register error:', error?.stack || error);
+    return res.status(500).json({ success: false, message: 'Registration failed.' });
   }
 };
-
 
 // Verify email
 export const verifyEmail = async (req, res) => {

@@ -13,14 +13,23 @@ export const extractSkills = async (text, jobRequiredSkills = []) => {
   // Group skills by category
   const skillsDatabase = {};
   for (const skill of dbSkills) {
-    if (!skillsDatabase[skill.category]) {
-      skillsDatabase[skill.category] = [];
-    }
-    skillsDatabase[skill.category].push({
-      name: skill.name,
-      aliases: JSON.parse(skill.aliases || '[]')
-    });
+  if (!skillsDatabase[skill.category]) {
+    skillsDatabase[skill.category] = [];
   }
+  skillsDatabase[skill.category].push({
+    name: skill.name,
+    aliases: (() => {
+      try {
+        let parsed = JSON.parse(skill.aliases || '[]');
+        if (!Array.isArray(parsed)) parsed = [];
+        return parsed;
+      } catch {
+        return [];
+      }
+    })()
+  });
+}
+
 
   // Also check job-specific required skills (dynamic skills)
   if (jobRequiredSkills.length > 0) {
