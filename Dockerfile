@@ -7,11 +7,11 @@ RUN apt-get update && apt-get install -y poppler-utils
 # Set the working directory in the container
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json
-# We do this in a separate step to leverage Docker's caching mechanism
-COPY package.json ./
-COPY server/package.json ./server/
-RUN npm install --prefix server
+# Copy package.json and package-lock.json to leverage Docker's caching
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+RUN npm ci
 
 # Copy the rest of your application's code
 COPY . .
