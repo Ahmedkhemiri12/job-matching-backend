@@ -1,5 +1,8 @@
 // server/db/seeds/001_seed_skills.js
 export async function seed(knex) {
+  const client = (knex.client && knex.client.config && knex.client.config.client) || '';
+  const isPg = /pg|postgres/i.test(client);
+
   const rows = [
     // Languages
     { name: 'English', category: 'Languages', aliases: ['Englisch'] },
@@ -11,20 +14,27 @@ export async function seed(knex) {
   ];
 
   for (const r of rows) {
-    const existing = await knex('skills').whereRaw('LOWER(name)=LOWER(?)', [r.name]).first();
+    const existing = await knex('skills')
+      .whereRaw('LOWER(name) = LOWER(?)', [r.name])
+      .first();
+
+    const aliasesValue = isPg
+      ? knex.raw('?::jsonb', [JSON.stringify(r.aliases || [])])
+      : JSON.stringify(r.aliases || []);
+
     if (existing) {
       await knex('skills')
         .where({ id: existing.id })
         .update({
           category: r.category,
-          aliases: JSON.stringify(r.aliases || []),
+          aliases: aliasesValue,
           updated_at: knex.fn.now(),
         });
     } else {
       await knex('skills').insert({
         name: r.name,
         category: r.category,
-        aliases: JSON.stringify(r.aliases || []),
+        aliases: aliasesValue,
         created_at: knex.fn.now(),
         updated_at: knex.fn.now(),
       });

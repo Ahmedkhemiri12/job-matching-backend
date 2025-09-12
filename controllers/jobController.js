@@ -1,6 +1,16 @@
+// server/controllers/jobController.js
 import db from '../db/database.js';
 import { addSkillsToDatabase } from '../services/skillExtractor.js';
 import { normalizeSkills } from '../utils/skillDatabase.js';
+
+// ---------- DB offline guard ----------
+function isDbConfigured() {
+  if (process.env.DATABASE_URL) return true;
+  const keys = ['PGHOST', 'PGUSER', 'PGPASSWORD', 'PGDATABASE'];
+  return keys.every(k => (process.env[k] || '').trim().length > 0);
+}
+const DB_OFFLINE =
+  process.env.SKILLS_DB_OFFLINE === 'true' || !isDbConfigured();
 
 // ---------- Helper: tolerant array parser (CSV or JSON) ----------
 function toArrayFlexible(value) {
@@ -15,21 +25,22 @@ function toArrayFlexible(value) {
   if (value == null) return [];
   return [String(value).trim()].filter(Boolean);
 }
-
-// Back-compat for reading from DB (fields may be JSON text or CSV)
 const safeSkills = (value) => toArrayFlexible(value);
 
 // ========== GET all active jobs ==========
 export const getJobs = async (req, res) => {
   try {
-    const rows = await db('jobs').where('is_active', true);
+    if (DB_OFFLINE) {
+      // No DB? Return an empty list (or add demo items if you like)
+      return res.json({ success: true, data: [] });
+    }
 
-    const data = rows.map((job) => ({
+    const rows = await db('jobs').where('is_active', true);
+    const data = rows.map(job => ({
       ...job,
       required_skills: safeSkills(job.required_skills),
       nice_to_have_skills: safeSkills(job.nice_to_have_skills),
     }));
-
     res.json({ success: true, data });
   } catch (error) {
     console.error('Get jobs error:', error?.stack || error);
@@ -40,15 +51,14 @@ export const getJobs = async (req, res) => {
 // ========== GET my jobs ==========
 export const getMyJobs = async (req, res) => {
   try {
-    const rows = await db('jobs')
-      .where({ created_by: req.user.id, is_active: true });
+    if (DB_OFFLINE) return res.json({ success: true, data: [] });
 
-    const data = rows.map((job) => ({
+    const rows = await db('jobs').where({ created_by: req.user.id, is_active: true });
+    const data = rows.map(job => ({
       ...job,
       required_skills: safeSkills(job.required_skills),
       nice_to_have_skills: safeSkills(job.nice_to_have_skills),
     }));
-
     res.json({ success: true, data });
   } catch (error) {
     console.error('Get my jobs error:', error?.stack || error);
@@ -59,12 +69,13 @@ export const getMyJobs = async (req, res) => {
 // ========== GET single job by id ==========
 export const getJobById = async (req, res) => {
   try {
+    if (DB_OFFLINE) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
     const job = await db('jobs').where({ id: req.params.id }).first();
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
     job.required_skills = safeSkills(job.required_skills);
     job.nice_to_have_skills = safeSkills(job.nice_to_have_skills);
-
     res.json(job);
   } catch (error) {
     console.error('Get job by id error:', error?.stack || error);
@@ -75,6 +86,8 @@ export const getJobById = async (req, res) => {
 // ========== Create job ==========
 export const createJob = async (req, res) => {
   try {
+    if (DB_OFFLINE) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
     if (req.user.role !== 'recruiter') {
       return res.status(403).json({ success: false, message: 'Only recruiters can create jobs.' });
     }
@@ -106,7 +119,7 @@ export const createJob = async (req, res) => {
       category = 'Design & Creative';
     }
 
-    // Normalize + seed skills DB
+    // Normalize + seed skills DB (safe: normalizeSkills already has DB guard)
     if (requiredSkills.length > 0) {
       requiredSkills = await normalizeSkills(requiredSkills);
       await addSkillsToDatabase(requiredSkills, category);
@@ -128,7 +141,6 @@ export const createJob = async (req, res) => {
       updated_at: new Date()
     };
 
-    // Robust insert across dialects
     let result = await db('jobs').insert(insertData).returning(['id']);
     if (Array.isArray(result)) result = result[0] ?? result;
     const id = (result && typeof result === 'object') ? result.id : result;
@@ -143,6 +155,8 @@ export const createJob = async (req, res) => {
 // ========== Update job ==========
 export const updateJob = async (req, res) => {
   try {
+    if (DB_OFFLINE) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
     const jobId   = req.params.id;
     const userId  = req.user.id;
     const userRole = req.user.role;
@@ -157,11 +171,9 @@ export const updateJob = async (req, res) => {
     let requiredSkillsRaw   = req.body.requiredSkills ?? req.body.required_skills ?? job.required_skills ?? '';
     let niceToHaveSkillsRaw = req.body.niceToHaveSkills ?? req.body.nice_to_have_skills ?? job.nice_to_have_skills ?? '';
 
-    // Tolerant → arrays
     let requiredSkills   = toArrayFlexible(requiredSkillsRaw);
     let niceToHaveSkills = toArrayFlexible(niceToHaveSkillsRaw);
 
-    // Optionally re-normalize and add to skills DB
     if (requiredSkills.length > 0) {
       requiredSkills = await normalizeSkills(requiredSkills);
       await addSkillsToDatabase(requiredSkills);
@@ -190,6 +202,8 @@ export const updateJob = async (req, res) => {
 // ========== Delete job (soft) ==========
 export const deleteJob = async (req, res) => {
   try {
+    if (DB_OFFLINE) return res.status(503).json({ success: false, message: 'Database unavailable' });
+
     const jobId = req.params.id;
     const userId = req.user.id;
     const userRole = req.user.role;

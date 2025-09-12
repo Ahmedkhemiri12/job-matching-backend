@@ -1,23 +1,20 @@
-# Use an official Node.js runtime as a parent image
+# Use the official Node.js 20 image, as specified in your package.json
 FROM node:20-slim
 
-# Install poppler-utils (which provides the pdftotext tool)
-RUN apt-get update && apt-get install -y poppler-utils
+# Create and set the working directory inside the container
+WORKDIR /app
 
-# Set the working directory in the container
-WORKDIR /usr/src/app
+# Copy package.json and package-lock.json to leverage Docker layer caching
+COPY package*.json ./
 
-# Copy package.json and package-lock.json to leverage Docker's caching
-COPY package.json package-lock.json* ./
+# Install only production dependencies
+RUN npm install --production
 
-# Install dependencies
-RUN npm ci
-
-# Copy the rest of your application's code
+# Copy the rest of your application's code from the build context (your 'server' folder)
 COPY . .
 
-# Make port 10000 available to the world outside this container
-EXPOSE 10000
+# Expose the port your app runs on
+EXPOSE 5000
 
-# Define the command to run your app
-CMD [ "node", "server.js" ]
+# The command to run migrations, seeds, and then start the application
+CMD ["sh", "-c", "npx knex migrate:latest --knexfile ./knexfile.cjs && npx knex seed:run --knexfile ./knexfile.cjs && node ./server.js"]

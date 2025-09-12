@@ -1,7 +1,12 @@
 // server/utils/skillDatabase.js
+// Robust skill helpers with DB-offline guard + safe fallbacks.
+// Works even if DATABASE_URL/PGHOST are misconfigured.
+
 import db from '../db/database.js';
 
-// --- Helper: tolerate bad JSON & non-array shapes ---
+/* ------------------------------ Helpers ------------------------------ */
+
+// Be tolerant of bad JSON / non-array shapes.
 function safeParseArray(value) {
   try {
     const v = typeof value === 'string' ? JSON.parse(value) : value;
@@ -11,31 +16,19 @@ function safeParseArray(value) {
   }
 }
 
-// This function replaces the static skillDatabase object
-export const getSkillsFromDatabase = async () => {
-  try {
-    const skills = await db('skills').select('*');
-    const skillsByCategory = {};
-    
-    for (const skill of skills) {
-      if (!skillsByCategory[skill.category]) {
-        skillsByCategory[skill.category] = [];
-      }
-      skillsByCategory[skill.category].push({
-        name: skill.name,
-        aliases: safeParseArray(skill.aliases)
-      });
-    }
-    
-    return skillsByCategory;
-  } catch (error) {
-    console.error('Error fetching skills from database:', error);
-    // Return empty object if database not ready
-    return {};
-  }
-};
+// Detect if DB creds exist (DATABASE_URL or full PG* set)
+function isDbConfigured() {
+  if (process.env.DATABASE_URL) return true;
+  const need = ['PGHOST', 'PGUSER', 'PGPASSWORD', 'PGDATABASE'];
+  return need.every((k) => (process.env[k] || '').trim().length > 0);
+}
 
-// Keep the static data for initial seeding only
+// One switch to run in DB-less mode
+const DB_OFFLINE =
+  process.env.SKILLS_DB_OFFLINE === 'true' || !isDbConfigured();
+
+/* --------------------------- Seed / Static data --------------------------- */
+// (kept from your file; used for fallback lookups & initial seeding)
 export const initialSkillData = {
   Programming: [
     { name: "JavaScript", aliases: ["JS", "Javascript"] },
@@ -175,70 +168,162 @@ export const initialSkillData = {
   ],
 };
 
-// For backwards compatibility - this will be removed later
+// Back-compat export (kept as in your file)
 export const skillDatabase = initialSkillData;
 
-// Get skills for a specific category
-export const getSkillsByCategory = async (category) => {
+/* ----------------------------- DB-backed APIs ----------------------------- */
+
+export const getSkillsFromDatabase = async () => {
+  if (DB_OFFLINE) return {};
   try {
-    const skills = await db('skills')
-      .where('category', category)
-      .select('*');
-    
-    return skills.map(skill => ({
-      name: skill.name,
-      aliases: safeParseArray(skill.aliases)
+    const skills = await db('skills').select('*');
+    const byCat = {};
+    for (const skill of skills) {
+      if (!byCat[skill.category]) byCat[skill.category] = [];
+      byCat[skill.category].push({
+        name: skill.name,
+        aliases: safeParseArray(skill.aliases),
+      });
+    }
+    return byCat;
+  } catch (error) {
+    console.error('Error fetching skills from database (ignored):', error?.message || error);
+    return {};
+  }
+};
+
+export const getSkillsByCategory = async (category) => {
+  if (DB_OFFLINE) return [];
+  try {
+    const skills = await db('skills').where('category', category).select('*');
+    return skills.map((s) => ({
+      name: s.name,
+      aliases: safeParseArray(s.aliases),
     }));
   } catch (error) {
-    console.error('Error fetching skills by category:', error);
+    console.error('Error fetching skills by category (ignored):', error?.message || error);
     return [];
   }
 };
 
-// Search for a skill by name
 export const findSkillByName = async (skillName) => {
+  if (DB_OFFLINE) return null;
   try {
-    const skill = await db('skills')
-      .where('name', 'ilike', `%${skillName}%`)
-      .first();
-    
-    if (skill) {
-      skill.aliases = safeParseArray(skill.aliases);
-    }
-    
-    return skill;
+    const skill = await db('skills').where('name', 'ilike', `%${skillName}%`).first();
+    if (skill) skill.aliases = safeParseArray(skill.aliases);
+    return skill || null;
   } catch (error) {
-    console.error('Error finding skill:', error);
+    console.error('Error finding skill (ignored):', error?.message || error);
     return null;
   }
 };
 
-// Add skill with aliases
 export const addSkillWithAliases = async (name, category, aliases = []) => {
+  if (DB_OFFLINE) {
+    console.warn('addSkillWithAliases skipped: DB_OFFLINE');
+    return null;
+  }
   try {
     const safeAliases = safeParseArray(aliases);
-    const [id] = await db('skills').insert({
-      name,
-      category,
-      aliases: JSON.stringify(safeAliases),
-      created_at: new Date(),
-      updated_at: new Date()
-    }).returning('id');
-    
-    return id;
+    const [row] = await db('skills')
+      .insert({
+        name,
+        category,
+        aliases: JSON.stringify(safeAliases),
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+      .returning('id');
+    return row?.id ?? row ?? null;
   } catch (error) {
-    console.error('Error adding skill:', error);
+    console.error('Error adding skill (ignored):', error?.message || error);
     return null;
   }
 };
 
-// This function is no longer needed but kept for compatibility
-export const getTargetSkillsDB = (role) => {
+// Deprecated, kept for compatibility
+export const getTargetSkillsDB = (_role) => {
   console.warn('getTargetSkillsDB is deprecated. Skills should come from job requirements.');
   return [];
 };
 
-// REPLACE your normalizeSkill + normalizeSkills with THIS
+/* ---------------------- Normalization (DB + Fallbacks) --------------------- */
+
+// Common fallback aliases when DB is offline/unavailable
+const FALLBACK_ALIASES_MAP = {
+  // Web core
+  'html': 'HTML',
+  'html5': 'HTML',
+  'css': 'CSS',
+  'css3': 'CSS',
+  'sass': 'Sass',
+  'scss': 'Sass',
+
+  // JS/TS
+  'javascript': 'JavaScript',
+  'java script': 'JavaScript',
+  'js': 'JavaScript',
+  'typescript': 'TypeScript',
+  'type script': 'TypeScript',
+  'ts': 'TypeScript',
+
+  // React/Next
+  'react': 'React',
+  'reactjs': 'React',
+  'react.js': 'React',
+  'react js': 'React',
+  'next': 'Next.js',
+  'nextjs': 'Next.js',
+  'next.js': 'Next.js',
+  'next js': 'Next.js',
+
+  // Node/Express
+  'node': 'Node.js',
+  'nodejs': 'Node.js',
+  'node.js': 'Node.js',
+  'node js': 'Node.js',
+  'express': 'Express',
+  'expressjs': 'Express',
+  'express.js': 'Express',
+  'express js': 'Express',
+
+  // DB / Infra / Cloud
+  'sql': 'SQL',
+  'postgres': 'PostgreSQL',
+  'postgresql': 'PostgreSQL',
+  'psql': 'PostgreSQL',
+  'mongodb': 'MongoDB',
+  'mongo': 'MongoDB',
+  'redis': 'Redis',
+  'docker': 'Docker',
+  'docker compose': 'Docker',
+  'docker-compose': 'Docker',
+  'k8s': 'Kubernetes',
+  'kubernetes': 'Kubernetes',
+  'aws': 'AWS',
+  'amazon web services': 'AWS',
+  'gcp': 'Google Cloud',
+  'google cloud': 'Google Cloud',
+  'google cloud platform': 'Google Cloud',
+  'azure': 'Azure',
+
+  // .NET / C-family
+  '.net': '.NET',
+  'dotnet': '.NET',
+  'asp.net': '.NET',
+  'asp net': '.NET',
+  'c#': 'C#',
+  'c sharp': 'C#',
+  'c-sharp': 'C#',
+  'c++': 'C++',
+  'cpp': 'C++',
+
+  // Tools
+  'git': 'Git',
+  'github': 'Git',
+  'gitlab': 'Git',
+  'bitbucket': 'Git',
+};
 
 export const normalizeSkill = async (skillName) => {
   try {
@@ -246,48 +331,43 @@ export const normalizeSkill = async (skillName) => {
     if (!raw) return '';
     const lower = raw.toLowerCase();
 
-    // 1) DB exact match (case-insensitive)
-    let skill = await db('skills')
-      .whereRaw('LOWER(name) = LOWER(?)', [raw])
-      .first();
-    if (skill) return skill.name;
+    // Try DB only if configured
+    if (!DB_OFFLINE) {
+      try {
+        // Exact canonical name (case-insensitive)
+        const exact = await db('skills')
+          .whereRaw('LOWER(name) = ?', [lower])
+          .first();
+        if (exact?.name) return exact.name;
 
-    // 2) DB alias match (case-insensitive)
-    const skills = await db('skills').select('name', 'aliases');
-    for (const s of skills) {
-      const aliases = safeParseArray(s.aliases).map(a => String(a).toLowerCase());
-      if (aliases.includes(lower)) return s.name;
+        // Alias match across all skills
+        const rows = await db('skills').select('name', 'aliases');
+        for (const row of rows) {
+          const aliases = safeParseArray(row.aliases).map((a) => String(a).toLowerCase());
+          if (aliases.includes(lower)) return row.name;
+        }
+      } catch (e) {
+        // Swallow DB errors and continue to fallback
+        console.error('DB normalize error (ignored):', e?.message || e);
+      }
     }
 
-    // 3) Quick fallback aliases for common variants
-    const FALLBACK_ALIASES = {
-      englisch: 'English',
-      english: 'English',
-      deutsch: 'German',
-      german: 'German',
-      'react.js': 'React',
-      reactjs: 'React',
-      nodejs: 'Node.js',
-      'node js': 'Node.js',
-      ai: 'Artificial Intelligence',
-      ml: 'Machine Learning',
-      'machine learning': 'Machine Learning',
-    };
-    if (FALLBACK_ALIASES[lower]) return FALLBACK_ALIASES[lower];
+    // Fallback alias map
+    if (FALLBACK_ALIASES_MAP[lower]) return FALLBACK_ALIASES_MAP[lower];
 
-    // 4) Fallback to static seed list (initialSkillData)
+    // Fallback to static seed list
     for (const category of Object.values(initialSkillData)) {
       for (const item of category) {
         if (String(item.name).toLowerCase() === lower) return item.name;
-        const itemAliases = (item.aliases || []).map(a => String(a).toLowerCase());
+        const itemAliases = (item.aliases || []).map((a) => String(a).toLowerCase());
         if (itemAliases.includes(lower)) return item.name;
       }
     }
 
-    // 5) Return original if still unknown
+    // Unknown → return original string
     return raw;
-  } catch (error) {
-    console.error('Error normalizing skill:', error);
+  } catch (err) {
+    console.error('Error normalizing skill (fallback to raw):', err?.message || err);
     return skillName;
   }
 };
@@ -295,7 +375,7 @@ export const normalizeSkill = async (skillName) => {
 export const normalizeSkills = async (skills = []) => {
   const mapped = await Promise.all((skills || []).map(normalizeSkill));
   const seen = new Set();
-  return mapped.filter(s => {
+  return mapped.filter((s) => {
     const v = String(s || '').trim();
     if (!v) return false;
     const k = v.toLowerCase();

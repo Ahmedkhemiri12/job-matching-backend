@@ -1,10 +1,8 @@
 // server/controllers/resumeController.js
+
 import { extractTextFromFile } from '../services/parserService.js';
-import { extractSkills } from '../services/skillExtractor.js';
-import { saveApplication } from '../services/applicationService.js';
+import { extractSkillsFromText } from '../services/skillExtractor.js';
 import { normalizeSkills } from '../utils/skillDatabase.js';
-import { computeMatch } from '../utils/matching.js';
-import db from '../db/database.js';
 
 /**
  * Tolerant array parser for query/body fields that might arrive as:
@@ -27,109 +25,65 @@ function toArrayFlexible(value) {
 
 /**
  * POST /api/resumes/parse
- * Accepts a resume file, extracts text + candidate skills, optionally matches
- * against job skills provided in the request body.
+ * Accepts a resume file, extracts text + candidate skills,
+ * and returns a normalized array of skill names.
  *
- * Body (optional):
- * - requiredSkills: array | csv | json-string
- * - niceSkills:     array | csv | json-string
- * - jobId:          string (if saving an application)
- *
- * Returns:
+ * Response:
  * {
  *   success: true,
- *   data: {
- *     text,
- *     rawCandidateSkills,
- *     candidateSkills,     // normalized
- *     jobRequiredSkills,   // normalized (if provided)
- *     jobNiceSkills,       // normalized (if provided)
- *     match: {             // only when job skills provided
- *       score, requiredPct, nicePct,
- *       requiredMatches, missingRequired, niceMatches,
- *       candidate, required, nice
- *     }
- *   }
+ *   skills: ["React","JavaScript", ...],
+ *   meta: { textLength, filename, size, mimetype }
  * }
  */
-export const parseResume = async (req, res) => {
+export async function parseResume(req, res) {
   try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'No file uploaded' });
-    }
-
-    // 1) Extract text from file
-    const text = await extractTextFromFile(req.file);
-
-    // 2) Extract skills from text (raw)
-    const rawCandidateSkills = await extractSkills(text);
-
-    // 3) Normalize via DB-backed canonicalizer
-    const candidateSkills = await normalizeSkills(rawCandidateSkills);
-
-    // Optional job skills provided by client for immediate matching
-    const jobRequiredInput = toArrayFlexible(req.body?.requiredSkills);
-    const jobNiceInput     = toArrayFlexible(req.body?.niceSkills);
-
-    let jobRequiredSkills = [];
-    let jobNiceSkills     = [];
-    let match = null;
-
-    if (jobRequiredInput.length || jobNiceInput.length) {
-      jobRequiredSkills = await normalizeSkills(jobRequiredInput);
-      jobNiceSkills     = await normalizeSkills(jobNiceInput);
-
-      // **** NEW ORDER + NEW KEYS ****
-      // computeMatch(required, nice, candidate)
-      const result = computeMatch(jobRequiredSkills, jobNiceSkills, candidateSkills);
-      match = {
-        score: result.score,
-        requiredPct: result.requiredPct,
-        nicePct: result.nicePct,
-        requiredMatches: result.requiredMatches,
-        missingRequired: result.missingRequired,
-        niceMatches: result.niceMatches,
-        candidate: result.candidate,
-        required: result.required,
-        nice: result.nice,
-      };
-    }
-
-    // Optionally persist an application if jobId is provided
-    if (req.body?.jobId) {
-      await saveApplication({
-        db,
-        jobId: req.body.jobId,
-        fileMeta: {
-          originalname: req.file.originalname,
-          mimetype: req.file.mimetype,
-          size: req.file.size,
-        },
-        text,
-        candidateSkills,
-        match,
+    // 1) Ensure a file was uploaded
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded (expected field "resume")',
       });
     }
 
-    return res.json({
+    // 2) Extract raw text from the uploaded file (PDF/DOCX/etc.)
+    const text = await extractTextFromFile(file);
+
+    // 3) Extract skill names from the text (returns an array of strings)
+    const extracted = extractSkillsFromText(text);
+    const skillNames = Array.isArray(extracted) ? extracted : [];
+
+    // 4) Normalize via your skill database (canonicalize labels), best-effort
+    let normalized = skillNames;
+    try {
+      const out = await normalizeSkills(skillNames);
+      if (Array.isArray(out) && out.every(s => typeof s === 'string')) {
+        normalized = out;
+      }
+    } catch (e) {
+      // non-fatal; keep extracted skills
+      console.warn('normalizeSkills failed, using extracted skills:', e?.message);
+    }
+
+    // 5) Respond — frontend expects `skills` to be an ARRAY
+    return res.status(200).json({
       success: true,
-      data: {
-        text,
-        rawCandidateSkills,
-        candidateSkills,
-        jobRequiredSkills,
-        jobNiceSkills,
-        ...(match ? { match } : {}),
+      skills: normalized,
+      meta: {
+        textLength: text?.length || 0,
+        filename: file.originalname,
+        size: file.size,
+        mimetype: file.mimetype,
       },
     });
-  } catch (error) {
-    console.error('Parse resume error:', error);
+  } catch (err) {
+    console.error('PARSE ERROR:', err);
     return res.status(500).json({
       success: false,
-      message: error?.message || 'Failed to parse resume',
+      message: err?.message || 'Resume parse failed',
     });
   }
-};
+}
 
 /**
  * GET /api/resumes/target-skills?role=... OR ?skills=csv/json/array

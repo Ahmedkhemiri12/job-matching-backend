@@ -75,7 +75,11 @@ app.get('/health', (_req, res) => {
 });
 
 /* ----------------------------------- Routes -------------------------------- */
+/* ----------------------------------- Routes -------------------------------- */
+console.log('DEBUG: About to mount /api/resumes. The resumeRoutes object is:', resumeRoutes);
 app.use('/api/resumes', resumeRoutes);
+console.log('DEBUG: Successfully mounted /api/resumes routes.');
+
 app.use('/api/applications', applicationRoutes);
 app.use('/api/jobs', jobRoutes);
 app.use('/api/auth', authRoutes);

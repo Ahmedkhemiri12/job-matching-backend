@@ -1,13 +1,13 @@
-// server/knexfile.js
-import 'dotenv/config';
+// server/knexfile.cjs
+require('dotenv/config');
 
+// The paths are now correct for running from inside the 'server' directory
 const shared = {
-  // ⬇️ these paths are now relative to server/ (where this file lives)
-  migrations: { directory: './db/migrations' },
-  seeds:      { directory: './db/seeds' },
+  migrations: { directory: './db/migrations', loadExtensions: ['.cjs', '.js'] },
+  seeds:      { directory: './db/seeds',      loadExtensions: ['.cjs', '.js'] },
 };
 
-export default {
+module.exports = {
   development: {
     client: 'pg',
     connection: process.env.DATABASE_URL_DEV,
