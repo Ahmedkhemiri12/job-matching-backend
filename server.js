@@ -1,6 +1,10 @@
-// server/server.js
+import 'dotenv/config';
 import app from './app.js';
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`API listening on :${PORT}`);
-});
+import { runMigrationsAndSeeds } from './db/runMigrations.js';
+
+const PORT = process.env.PORT || 10000;
+
+(async () => {
+  await runMigrationsAndSeeds();
+  app.listen(PORT, () => console.log(`API listening on :${PORT}`));
+})();
