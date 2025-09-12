@@ -3,3 +3,4 @@ node_modules/
 *.log
 database.sqlite
 uploads/
+server.js.bak
