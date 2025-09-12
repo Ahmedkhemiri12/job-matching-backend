@@ -7,7 +7,7 @@ import cors from 'cors';
 import resumeRoutes from './routes/resumeRoutes.js';
 import applicationRoutes from './routes/applicationRoutes.js';
 import jobRoutes from './routes/jobRoutes.js';
-import authRoutes from './routes/authRoutes.js';
+import authRoutes from './routes/auth.js';
 import interviewRoutes from './routes/interviewRoutes.js';
 
 // Optional services
