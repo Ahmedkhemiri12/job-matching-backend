@@ -258,9 +258,16 @@ export const login = async (req, res) => {
     }
 
     const user = await db('users').whereRaw('LOWER(email) = ?', [normEmail]).first();
-    if (!user) return res.status(400).json({ success: false, message: 'Invalid credentials.' });
+if (!user) return res.status(400).json({ success: false, message: 'Invalid credentials.' });
 
-    const hash = pickStoredHash(user);
+// ✅ ADD THIS:
+if (!user.email_verified) {
+  return res
+    .status(403)
+    .json({ success: false, message: 'Please verify your email before logging in.' });
+}
+
+const hash = pickStoredHash(user);
     if (!hash) {
       console.error('AUTH: user has no stored password hash', {
         id: user.id,
